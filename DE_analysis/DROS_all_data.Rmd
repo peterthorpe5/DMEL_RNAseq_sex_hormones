@@ -1,0 +1,705 @@
+---
+title: "DROS body parts shown dead females, or something like that :) sounds like torture to me "
+author: "Peter Thorpe"
+date: "09 Sep 2022"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r include=FALSE}
+
+
+knitr::opts_chunk$set(comment = NA)
+error = TRUE
+
+```
+
+#0.1 QC! 
+
+Fastqc was run on raw and trimmed data. See Mutliqc output
+
+Read were then trimmed using trimmomatic Q25, min len 69. Mapped using Salmon 
+(whole genome was used as a decoy in index prep). 
+
+##load the libs needed 
+
+
+```{r}
+
+library(tidyverse)
+library(DESeq2) # not used, yet(?)
+library(plotly)
+library(ggplot2)
+library(tidyverse)
+library(ggrepel)
+library(htmlwidgets)
+library(edgeR)
+library(tibble)
+library(data.table)
+
+```
+
+
+#0.2 load the data
+
+counts were already generated using salmon and counts.matrix generated using trinity. 
+Along with the normalised counts. 
+
+```{r}
+
+setwd("C:/Users/pjt6/OneDrive - University of St Andrews/2022Sep05_RNAseq_DROS_Mike_R_Tanya/RNAseq/gene")
+
+# this one is just one species
+
+#cts <- read.delim("DMEL.genes.isoform.counts.matrix", 
+ #                 header=T, row.names=1)
+
+# full datset
+
+cts <- read.delim("DMEL.genes.isoform.counts - Copy.matrix", 
+                  header=T, row.names=1)
+
+# just one species
+#coldata = read.table("metadata_2.txt", header=T, com='', 
+ #                     sep="\t", check.names=F, row.names=1)
+
+# full dataset
+coldata = read.table("metadata_2 - Copy.txt", header=T, com='', 
+                      sep="\t", check.names=F, row.names=1)
+
+
+```
+
+
+have a quick look at the data:
+
+```{r}
+
+head(cts)
+
+
+```
+
+```{r}
+
+head(coldata)
+
+```
+
+
+convert to factors
+
+```{r}
+
+coldata <- coldata[,c("condition", "treatment", "body_part", "batch", "reps", "strain")]
+coldata$condition <- factor(coldata$condition)
+coldata$strain <- factor(coldata$strain)
+coldata$side <- factor(coldata$body_part)
+coldata$Age_of_bat <- factor(coldata$batch)
+coldata$reps <- factor(coldata$reps)
+strain <- factor(coldata$strain)
+condition <- factor(coldata$condition)
+treatment <- factor(coldata$treatment)
+batch <- factor(coldata$batch)
+body_part <- factor(coldata$body_part)
+
+```
+
+check the samples are in both files:
+check that the order of the table and the colomns in the counts.matrix march, if not, then fix:
+
+```{r}
+
+all(rownames(coldata) %in% colnames(cts))
+# TRUE
+
+rownames(coldata) <-  rownames(coldata)
+
+all(rownames(coldata) == colnames(cts))
+# FALSE
+
+cts <- cts[, rownames(coldata)]
+
+all(rownames(coldata) == colnames(cts))
+# TRUE
+cts <- cts[, rownames(coldata)]
+all(rownames(coldata) == colnames(cts))
+
+```
+
+
+
+explicitly set up the group (yes, this is contained in the table!)
+
+```{r}
+
+# these get reordered to this - they are not in this order in the matrix,
+# but this is reorderd as above
+group=c('CSHA','CSHA','CSHA','CSHA','CSHA',
+        'CSHT','CSHT','CSHT','CSHT','CSHT',
+        'CSCA','CSCA','CSCA','CSCA','CSCA',
+        'CSCT','CSCT','CSCT','CSCT','CSCT',
+        'CSFA','CSFA','CSFA','CSFA','CSFA',
+        'CSFT','CSFT','CSFT','CSFT','CSFT',
+        'ITHA','ITHA','ITHA','ITHA','ITHT',
+        'ITHT','ITHT','ITHT','ITCA','ITCA',
+        'ITCA','ITCA','ITCT','ITCT','ITCT',
+        'ITCT','ITFA','ITFA','ITFA','ITFA',
+        'ITFT','ITFT','ITFT','ITFT')
+
+
+```
+
+
+#0.3 R Packages now to start using edgeR to do some analysis: https://bioconductor.org/packages/release/bioc/vignettes/edgeR/inst/doc/edgeR.pdf
+
+
+```{r}
+y <- DGEList(counts=cts, group=group)
+
+condition<-coldata$condition # just so I dont have to keep using dollars :)
+
+```
+
+
+filter low expressing genes. Stats perfomred in a larger number, when lots are zero to low expressing negatively impacts on the data. 5,640 genes dropped from the analysis. 
+
+```{r}
+
+keep <- filterByExpr(y)
+
+table(keep)
+
+```
+
+calculate nomrlaisation factors and normalise the data for lib depth differences
+
+```{r}
+
+y <- y[keep, , keep.lib.sizes=FALSE]
+#The TMM normalization is applied to account for the compositional biases:
+y <- calcNormFactors(y)
+
+y$samples
+
+```
+
+
+following this https://support.bioconductor.org/p/56637/ with a problem with y, see the fix at the webpage. Reasign to d:
+
+```{r}
+
+d <- DGEList(counts=y,group=group)
+
+keep <- filterByExpr(d)
+
+table(keep)
+
+d <- d[keep, , keep.lib.sizes=FALSE]
+
+d <- calcNormFactors(d)
+
+# plotMDS(d)  # too packed up to see - see the PCA
+
+```
+
+
+Before we fit GLMs, we need to define our design matrix based on the experimental design. 
+We want to test for differential expressions between our conditions within batches, i.e. adjusting for differences between batches. In statistical terms,
+this is an additive linear model. So the design matrix is created as:
+
+```{r}
+
+#design <- model.matrix(~0 + treatment*strain + batch)
+
+
+```
+
+
+```{r}
+
+#rownames(design) <- colnames(d)
+
+
+```
+
+
+```{r}
+
+#design
+
+```
+
+
+run the DE analysis:
+
+```{r}
+
+#d <- estimateDisp(d, design)
+
+# this GLM is better for low numbers of reps.
+ #fit <- glmQLFit(d, design)
+ 
+ 
+# plotQLDisp(fit)
+
+ 
+ 
+```
+
+section 3.3 of the EdgeR manual on how to get all the possible interactions
+
+```{r}
+
+Group <- factor(paste(condition, strain, sep="."))
+
+cbind(design,Group=Group)
+
+```
+
+
+this is an alternative way of setting up the matrix
+
+```{r}
+
+# This does not have batch correction in , must look into this!!!
+# i get this error if I add a + batch in the desing:
+# Error in dimnames(x) <- dn : 
+#  length of 'dimnames' [2] not equal to array extent
+
+design <- model.matrix(~0 + Group )
+colnames(design) <- levels(Group)
+
+Group <- factor(paste(condition, strain, sep="."))
+
+cbind(design,Group=Group)
+
+d <- estimateDisp(d, design)
+
+# this GLM is better for low numbers of reps.
+ fit <- glmQLFit(d, design)
+
+```
+
+
+#0.4 specific comparisons
+
+
+
+
+```{r}
+
+my.contrasts <- makeContrasts(abdomen_blank_dummy_up_IT_IV_69     = 	ITCA.IT_IV_69 - CSCA.CanS,
+abdomen_blank_dummy_up_CanS         = 	CSCA.CanS - ITCA.IT_IV_69,
+head_thorax_blank_dummy_up_IT_IV_69 = 	ITCT.IT_IV_69 - CSCT.CanS,
+head_thorax_blank_dummy_up_CanS     = 	CSCT.CanS - ITCT.IT_IV_69,
+abdomen_dead_female_up_IT_IV_69     = 	ITFA.IT_IV_69 - CSFA.CanS,
+abdomen_dead_female_up_CanS         = 	CSFA.CanS - ITFA.IT_IV_69,
+head_thorax_dead_female_up_IT_IV_69 = 	ITFT.IT_IV_69 - CSFT.CanS,
+head_thorax_dead_female_up_CanS     = 	CSFT.CanS - ITFT.IT_IV_69,
+abdomen_HD_dummy_up_IT_IV_69        = 	ITHA.IT_IV_69 - CSHA.CanS,
+abdomen_HD_dummy_up_CanS            = 	CSHA.CanS - ITHA.IT_IV_69,
+head_thorax_HD_dummy_up_IT_IV_69    = 	ITHT.IT_IV_69 - CSHT.CanS,
+head_thorax_HD_dummy_up_CanS        =	CSHT.CanS - ITHT.IT_IV_69, levels=design)
+
+
+```
+
+
+
+
+# abdomen_blank_dummy_up_IT_IV_69
+
+```{r}
+# abdomen_blank_dummy_up_IT_IV_69
+qlf <- glmQLFTest(fit, contrast=my.contrasts[,"abdomen_blank_dummy_up_IT_IV_69"])
+
+tTags = topTags(qlf,n=NULL)
+
+result_table = tTags$table
+
+result_table = data.frame(sampleA="IT_IV_69", sampleB="CanS", result_table)
+result_table = merge(result_table, cts,by="row.names",all.x=TRUE)
+result_table <- result_table[order(result_table$logFC),]
+
+
+write.table(result_table, file='abdomen_blank_dummy_up_IT_IV_69_vs_CanS.GLM.edgeR.DE_results', sep='	', quote=F, row.names=T, col.names = NA)
+
+```
+
+
+
+# abdomen_blank_dummy_up_CanS
+
+```{r}
+# abdomen_blank_dummy_up_CanS
+qlf <- glmQLFTest(fit, contrast=my.contrasts[,"abdomen_blank_dummy_up_CanS"])
+
+tTags = topTags(qlf,n=NULL)
+
+result_table = tTags$table
+
+result_table = data.frame(sampleA="CanS", sampleB="IT_IV_69", result_table)
+result_table = merge(result_table, cts,by="row.names",all.x=TRUE)
+result_table <- result_table[order(result_table$logFC),]
+
+
+write.table(result_table, file='abdomen_blank_dummy_up_CanS_vs_IT_IV_69.GLM.edgeR.DE_results', sep='	', quote=F, row.names=T, col.names = NA)
+
+```
+
+
+
+# head_thorax_blank_dummy_up_IT_IV_69
+
+```{r}
+# head_thorax_blank_dummy_up_IT_IV_69
+qlf <- glmQLFTest(fit, contrast=my.contrasts[,"head_thorax_blank_dummy_up_IT_IV_69"])
+
+tTags = topTags(qlf,n=NULL)
+
+result_table = tTags$table
+
+result_table = data.frame(sampleA="IT_IV_69", sampleB="CanS", result_table)
+result_table = merge(result_table, cts,by="row.names",all.x=TRUE)
+result_table <- result_table[order(result_table$logFC),]
+
+
+write.table(result_table, file='head_thorax_blank_dummy_up_IT_IV_69_vs_CanS.GLM.edgeR.DE_results', sep='	', quote=F, row.names=T, col.names = NA)
+
+```
+
+
+
+# head_thorax_blank_dummy_up_CanS
+
+```{r}
+# head_thorax_blank_dummy_up_CanS
+qlf <- glmQLFTest(fit, contrast=my.contrasts[,"head_thorax_blank_dummy_up_CanS"])
+
+tTags = topTags(qlf,n=NULL)
+
+result_table = tTags$table
+
+result_table = data.frame(sampleA="CanS", sampleB="IT_IV_69", result_table)
+result_table = merge(result_table, cts,by="row.names",all.x=TRUE)
+result_table <- result_table[order(result_table$logFC),]
+
+
+write.table(result_table, file='head_thorax_blank_dummy_up_CanS_vs_IT_IV_69.GLM.edgeR.DE_results', sep='	', quote=F, row.names=T, col.names = NA)
+
+```
+
+
+
+# abdomen_dead_female_up_IT_IV_69
+
+```{r}
+# abdomen_dead_female_up_IT_IV_69
+qlf <- glmQLFTest(fit, contrast=my.contrasts[,"abdomen_dead_female_up_IT_IV_69"])
+
+tTags = topTags(qlf,n=NULL)
+
+result_table = tTags$table
+
+result_table = data.frame(sampleA="IT_IV_69", sampleB="CanS", result_table)
+result_table = merge(result_table, cts,by="row.names",all.x=TRUE)
+result_table <- result_table[order(result_table$logFC),]
+
+
+write.table(result_table, file='abdomen_dead_female_up_IT_IV_69_vs_CanS.GLM.edgeR.DE_results', sep='	', quote=F, row.names=T, col.names = NA)
+
+```
+
+
+
+# abdomen_dead_female_up_CanS
+
+```{r}
+# abdomen_dead_female_up_CanS
+qlf <- glmQLFTest(fit, contrast=my.contrasts[,"abdomen_dead_female_up_CanS"])
+
+tTags = topTags(qlf,n=NULL)
+
+result_table = tTags$table
+
+result_table = data.frame(sampleA="CanS", sampleB="IT_IV_69", result_table)
+result_table = merge(result_table, cts,by="row.names",all.x=TRUE)
+result_table <- result_table[order(result_table$logFC),]
+
+
+write.table(result_table, file='abdomen_dead_female_up_CanS_vs_IT_IV_69.GLM.edgeR.DE_results', sep='	', quote=F, row.names=T, col.names = NA)
+
+```
+
+
+
+# head_thorax_dead_female_up_IT_IV_69
+
+```{r}
+# head_thorax_dead_female_up_IT_IV_69
+qlf <- glmQLFTest(fit, contrast=my.contrasts[,"head_thorax_dead_female_up_IT_IV_69"])
+
+tTags = topTags(qlf,n=NULL)
+
+result_table = tTags$table
+
+result_table = data.frame(sampleA="IT_IV_69", sampleB="CanS", result_table)
+result_table = merge(result_table, cts,by="row.names",all.x=TRUE)
+result_table <- result_table[order(result_table$logFC),]
+
+
+write.table(result_table, file='head_thorax_dead_female_up_IT_IV_69_vs_CanS.GLM.edgeR.DE_results', sep='	', quote=F, row.names=T, col.names = NA)
+
+```
+
+
+
+# head_thorax_dead_female_up_CanS
+
+```{r}
+# head_thorax_dead_female_up_CanS
+qlf <- glmQLFTest(fit, contrast=my.contrasts[,"head_thorax_dead_female_up_CanS"])
+
+tTags = topTags(qlf,n=NULL)
+
+result_table = tTags$table
+
+result_table = data.frame(sampleA="CanS", sampleB="IT_IV_69", result_table)
+result_table = merge(result_table, cts,by="row.names",all.x=TRUE)
+result_table <- result_table[order(result_table$logFC),]
+
+
+write.table(result_table, file='head_thorax_dead_female_up_CanS_vs_IT_IV_69.GLM.edgeR.DE_results', sep='	', quote=F, row.names=T, col.names = NA)
+
+```
+
+
+
+# abdomen_HD_dummy_up_IT_IV_69
+
+```{r}
+# abdomen_HD_dummy_up_IT_IV_69
+qlf <- glmQLFTest(fit, contrast=my.contrasts[,"abdomen_HD_dummy_up_IT_IV_69"])
+
+tTags = topTags(qlf,n=NULL)
+
+result_table = tTags$table
+
+result_table = data.frame(sampleA="IT_IV_69", sampleB="CanS", result_table)
+result_table = merge(result_table, cts,by="row.names",all.x=TRUE)
+result_table <- result_table[order(result_table$logFC),]
+
+
+write.table(result_table, file='abdomen_HD_dummy_up_IT_IV_69_vs_CanS.GLM.edgeR.DE_results', sep='	', quote=F, row.names=T, col.names = NA)
+
+```
+
+
+
+# abdomen_HD_dummy_up_CanS
+
+```{r}
+# abdomen_HD_dummy_up_CanS
+qlf <- glmQLFTest(fit, contrast=my.contrasts[,"abdomen_HD_dummy_up_CanS"])
+
+tTags = topTags(qlf,n=NULL)
+
+result_table = tTags$table
+
+result_table = data.frame(sampleA="CanS", sampleB="IT_IV_69", result_table)
+result_table = merge(result_table, cts,by="row.names",all.x=TRUE)
+result_table <- result_table[order(result_table$logFC),]
+
+
+write.table(result_table, file='abdomen_HD_dummy_up_CanS_vs_IT_IV_69.GLM.edgeR.DE_results', sep='	', quote=F, row.names=T, col.names = NA)
+
+```
+
+
+
+# head_thorax_HD_dummy_up_IT_IV_69
+
+```{r}
+# head_thorax_HD_dummy_up_IT_IV_69
+qlf <- glmQLFTest(fit, contrast=my.contrasts[,"head_thorax_HD_dummy_up_IT_IV_69"])
+
+tTags = topTags(qlf,n=NULL)
+
+result_table = tTags$table
+
+result_table = data.frame(sampleA="IT_IV_69", sampleB="CanS", result_table)
+result_table = merge(result_table, cts,by="row.names",all.x=TRUE)
+result_table <- result_table[order(result_table$logFC),]
+
+
+write.table(result_table, file='head_thorax_HD_dummy_up_IT_IV_69_vs_CanS.GLM.edgeR.DE_results', sep='	', quote=F, row.names=T, col.names = NA)
+
+```
+
+
+
+# head_thorax_HD_dummy_up_CanS
+
+```{r}
+# head_thorax_HD_dummy_up_CanS
+qlf <- glmQLFTest(fit, contrast=my.contrasts[,"head_thorax_HD_dummy_up_CanS"])
+
+tTags = topTags(qlf,n=NULL)
+
+result_table = tTags$table
+
+result_table = data.frame(sampleA="CanS", sampleB="IT_IV_69", result_table)
+result_table = merge(result_table, cts,by="row.names",all.x=TRUE)
+result_table <- result_table[order(result_table$logFC),]
+
+
+write.table(result_table, file='head_thorax_HD_dummy_up_CanS_vs_IT_IV_69.GLM.edgeR.DE_results', sep='	', quote=F, row.names=T, col.names = NA)
+
+```
+
+
+```{r}
+# more complex interactions. Bascailly condition of interest removing its # # corresponding condisiotn in the other species and the controls too...
+
+my.contrasts <- makeContrasts(
+abdomen_dead_female_up_IT_IV_69_abdomen_blank_dummy =   ITFA.IT_IV_69 - (CSFA.CanS - CSCA.CanS - ITCA.IT_IV_69),
+abdomen_dead_female_up_CanS_abdomen_blank_dummy  = CSFA.CanS - (ITFA.IT_IV_69 - CSCA.CanS - ITCA.IT_IV_69),
+head_thorax_dead_female_up_IT_IV_69_head_thorax_blank_dummy = ITFT.IT_IV_69 - (CSFT.CanS - ITCT.IT_IV_69 - CSCT.CanS),
+head_thorax_dead_female_up_CanS_head_thorax_blank =   CSFT.CanS - (ITFT.IT_IV_69 - CSCT.CanS - ITCT.IT_IV_69),
+head_thorax_HD_dummy_up_IT_IV_69_abdomen_HD_dummy   = ITHT.IT_IV_69 - (CSHT.CanS - ITHA.IT_IV_69 - CSHA.CanS),
+head_thorax_HD_dummy_up_CanS_abdomen_HD_dummy =    CSHT.CanS - (ITHT.IT_IV_69 - ITHA.IT_IV_69 - CSHA.CanS),
+levels=design)
+
+
+```
+
+
+
+
+
+# abdomen_dead_female_up_IT_IV_69_abdomen_blank_dummy
+
+```{r}
+# abdomen_dead_female_up_IT_IV_69_abdomen_blank_dummy
+qlf <- glmQLFTest(fit, contrast=my.contrasts[,"abdomen_dead_female_up_IT_IV_69_abdomen_blank_dummy"])
+
+tTags = topTags(qlf,n=NULL)
+
+result_table = tTags$table
+
+result_table = data.frame(sampleA="IT_IV_69", sampleB="CanS", result_table)
+result_table = merge(result_table, cts,by="row.names",all.x=TRUE)
+result_table <- result_table[order(result_table$logFC),]
+
+
+write.table(result_table, file='abdomen_dead_female_up_IT_IV_69_abdomen_blank_dummy_IT_IV_69_vs_corresp_and_controls.GLM.edgeR.DE_results', sep='	', quote=F, row.names=T, col.names = NA)
+
+```
+
+
+
+# abdomen_dead_female_up_CanS_abdomen_blank_dummy
+
+```{r}
+# abdomen_dead_female_up_CanS_abdomen_blank_dummy
+qlf <- glmQLFTest(fit, contrast=my.contrasts[,"abdomen_dead_female_up_CanS_abdomen_blank_dummy"])
+
+tTags = topTags(qlf,n=NULL)
+
+result_table = tTags$table
+
+result_table = data.frame(sampleA="CanS", sampleB="IT_IV_69", result_table)
+result_table = merge(result_table, cts,by="row.names",all.x=TRUE)
+result_table <- result_table[order(result_table$logFC),]
+
+
+write.table(result_table, file='abdomen_dead_female_up_CanS_abdomen_blank_dummy_CanS_vs_corresp_and_controls.GLM.edgeR.DE_results', sep='	', quote=F, row.names=T, col.names = NA)
+
+```
+
+
+
+# head_thorax_dead_female_up_IT_IV_69_head_thorax_blank_dummy
+
+```{r}
+# head_thorax_dead_female_up_IT_IV_69_head_thorax_blank_dummy
+qlf <- glmQLFTest(fit, contrast=my.contrasts[,"head_thorax_dead_female_up_IT_IV_69_head_thorax_blank_dummy"])
+
+tTags = topTags(qlf,n=NULL)
+
+result_table = tTags$table
+
+result_table = data.frame(sampleA="IT_IV_69", sampleB="CanS", result_table)
+result_table = merge(result_table, cts,by="row.names",all.x=TRUE)
+result_table <- result_table[order(result_table$logFC),]
+
+
+write.table(result_table, file='head_thorax_dead_female_up_IT_IV_69_head_thorax_blank_dummy_IT_IV_69_vs_corresp_and_controls.GLM.edgeR.DE_results', sep='	', quote=F, row.names=T, col.names = NA)
+
+```
+
+
+
+# head_thorax_dead_female_up_CanS_head_thorax_blank
+
+```{r}
+# head_thorax_dead_female_up_CanS_head_thorax_blank
+qlf <- glmQLFTest(fit, contrast=my.contrasts[,"head_thorax_dead_female_up_CanS_head_thorax_blank"])
+
+tTags = topTags(qlf,n=NULL)
+
+result_table = tTags$table
+
+result_table = data.frame(sampleA="CanS", sampleB="IT_IV_69", result_table)
+result_table = merge(result_table, cts,by="row.names",all.x=TRUE)
+result_table <- result_table[order(result_table$logFC),]
+
+
+write.table(result_table, file='head_thorax_dead_female_up_CanS_head_thorax_blank_CanS_vs_corresp_and_controls.GLM.edgeR.DE_results', sep='	', quote=F, row.names=T, col.names = NA)
+
+```
+
+
+
+# head_thorax_HD_dummy_up_IT_IV_69_abdomen_HD_dummy
+
+```{r}
+# head_thorax_HD_dummy_up_IT_IV_69_abdomen_HD_dummy
+qlf <- glmQLFTest(fit, contrast=my.contrasts[,"head_thorax_HD_dummy_up_IT_IV_69_abdomen_HD_dummy"])
+
+tTags = topTags(qlf,n=NULL)
+
+result_table = tTags$table
+
+result_table = data.frame(sampleA="IT_IV_69", sampleB="CanS", result_table)
+result_table = merge(result_table, cts,by="row.names",all.x=TRUE)
+result_table <- result_table[order(result_table$logFC),]
+
+
+write.table(result_table, file='head_thorax_HD_dummy_up_IT_IV_69_abdomen_HD_dummy_IT_IV_69_vs_corresp_and_controls.GLM.edgeR.DE_results', sep='	', quote=F, row.names=T, col.names = NA)
+
+```
+
+
+
+# head_thorax_HD_dummy_up_CanS_abdomen_HD_dummy
+
+```{r}
+# head_thorax_HD_dummy_up_CanS_abdomen_HD_dummy
+qlf <- glmQLFTest(fit, contrast=my.contrasts[,"head_thorax_HD_dummy_up_CanS_abdomen_HD_dummy"])
+
+tTags = topTags(qlf,n=NULL)
+
+result_table = tTags$table
+
+result_table = data.frame(sampleA="CanS", sampleB="IT_IV_69", result_table)
+result_table = merge(result_table, cts,by="row.names",all.x=TRUE)
+result_table <- result_table[order(result_table$logFC),]
+
+
+write.table(result_table, file='head_thorax_HD_dummy_up_CanS_abdomen_HD_dummy_CanS_vs_corresp_and_controls.GLM.edgeR.DE_results', sep='	', quote=F, row.names=T, col.names = NA)
+
+```
+
